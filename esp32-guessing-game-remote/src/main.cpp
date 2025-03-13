@@ -8,9 +8,9 @@ Made by Valérian Grégoire--Bégranger -- 2025
 #include <WiFi.h>
 #include <esp_now.h>
 
-// Game Manager MAC address
 // Remote MAC address: 30:C9:22:FF:81:D0
-uint8_t macAddress[6] = {0, 0, 0, 0, 0, 0};
+// Game Manager MAC address: 30:C9:22:FF:71:AC
+uint8_t macAddress[6] = {0x30, 0xC9, 0x22, 0xFF, 0x71, 0xAC};
 
 // Message buffer for retries
 uint8_t lastSentMessage;
@@ -24,16 +24,8 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
     uint8_t retries = 0;
     while (status != ESP_NOW_SEND_SUCCESS && retries++ < 5)
     {
-        Serial.printf("Resending... Attempt %d\n", retries);
+        // Serial.printf("Resending... Attempt %d\n", retries);
         esp_err_t result = esp_now_send(mac_addr, &lastSentMessage, sizeof(lastSentMessage));
-        if (result == ESP_OK)
-        {
-            Serial.println("Resend message queued");
-        }
-        else
-        {
-            Serial.println("Failed to queue resend");
-        }
         delay(100);
     }
 
@@ -53,7 +45,7 @@ enum class States
     wrong,
     won
 };
-States state;
+volatile States state;
 
 // Command codes
 const uint8_t CMD_GAME_START = 0x01;
@@ -67,14 +59,14 @@ const uint8_t buttonsCount = 3;
 const uint8_t buttonPins[buttonsCount] = {13, 14, 26};
 volatile bool buttonPressed[buttonsCount] = {false, false, false};
 uint32_t lastDebounceTime[buttonsCount] = {0, 0, 0};
-const uint32_t debounceDelay = 50; // 50ms debounce time
+const uint32_t debounceDelay = 20; // 20ms debounce time
 
 // LED pins
 const uint8_t redLed = 12;
 const uint8_t greenLed = 4;
 
 // Timer for LED states
-uint32_t stateCounter = 0;
+uint32_t lastStateUpdate = 0;
 uint32_t lastBreatheUpdate = 0;
 uint32_t lastBlinkUpdate = 0;
 
@@ -85,6 +77,8 @@ bool locked;
 void IRAM_ATTR onButtonPress(int buttonIndex)
 {
     unsigned long currentTime = millis();
+
+    // Only take the first press into consideration
     if (currentTime - lastDebounceTime[buttonIndex] > debounceDelay)
     {
         buttonPressed[buttonIndex] = true;
@@ -195,7 +189,7 @@ void loop()
 
     case States::correct:
         digitalWrite(greenLed, HIGH);
-        if (millis() - stateCounter > 2000)
+        if (millis() - lastStateUpdate > 2000)
         {
             state = States::playing;
             digitalWrite(greenLed, LOW);
@@ -204,7 +198,7 @@ void loop()
         
         case States::wrong:
         digitalWrite(redLed, HIGH);
-        if (millis() - stateCounter > 2000)
+        if (millis() - lastStateUpdate > 2000)
         {
             state = States::playing;
             digitalWrite(redLed, LOW);
@@ -215,7 +209,7 @@ void loop()
         case States::won:
         digitalWrite(redLed, millis() % 2000 < 1000 ? HIGH : LOW);
         digitalWrite(greenLed, millis() % 2000 < 1000 ? HIGH : LOW);
-        if (millis() - stateCounter > 10000)
+        if (millis() - lastStateUpdate > 10000)
         {
             state = States::ready;
             digitalWrite(greenLed, LOW);
@@ -243,17 +237,17 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
             break;
         case CMD_GOOD_GUESS:
             state = States::correct;
-            stateCounter = millis();
+            lastStateUpdate = millis();
             locked = true;
             break;
         case CMD_WRONG_GUESS:
             state = States::wrong;
-            stateCounter = millis();
+            lastStateUpdate = millis();
             locked = true;
             break;
         case CMD_GAME_WON:
             state = States::won;
-            stateCounter = millis();
+            lastStateUpdate = millis();
             locked = true;
             break;
         case CMD_CONFIRM:

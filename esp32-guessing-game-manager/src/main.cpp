@@ -1,5 +1,5 @@
 /*******************************************************************************
-Remote node. Acts as a controller to play the game.
+Game Manager node. Controls the game logic and difficulty.
 
 Made by Valérian Grégoire--Bégranger -- 2025
 *******************************************************************************/
@@ -8,50 +8,17 @@ Made by Valérian Grégoire--Bégranger -- 2025
 #include <WiFi.h>
 #include <esp_now.h>
 
-// Game Manager MAC address
+// Game Manager MAC address: 30:C9:22:FF:71:AC
 // Remote MAC address: 30:C9:22:FF:81:D0
-uint8_t macAddress[6] = {0, 0, 0, 0, 0, 0};
+uint8_t remoteMacAddress[6] = {0x30, 0xC9, 0x22, 0xFF, 0x81, 0xD0};
 
-// Message buffer for retries
-uint8_t lastSentMessage;
-
-// Callback when data is sent
-void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
-{
-    Serial.print("Last Packet Send Status: ");
-    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
-
-    uint8_t retries = 0;
-    while (status != ESP_NOW_SEND_SUCCESS && retries++ < 5)
-    {
-        Serial.printf("Resending... Attempt %d\n", retries);
-        esp_err_t result = esp_now_send(mac_addr, &lastSentMessage, sizeof(lastSentMessage));
-        if (result == ESP_OK)
-        {
-            Serial.println("Resend message queued");
-        }
-        else
-        {
-            Serial.println("Failed to queue resend");
-        }
-        delay(100);
-    }
-
-    if (retries == 5)
-    {
-        Serial.println("Failed to send after 5 attempts");
-    }
-}
-
-// State machine variables
+// Game states
 enum class States
 {
-    ready,
+    idle,
+    countdown,
     playing,
-    guessed,
-    correct,
-    wrong,
-    won
+    game_over
 };
 States state;
 
@@ -60,51 +27,122 @@ const uint8_t CMD_GAME_START = 0x01;
 const uint8_t CMD_GOOD_GUESS = 0x02;
 const uint8_t CMD_WRONG_GUESS = 0x03;
 const uint8_t CMD_GAME_WON = 0x04;
-const uint8_t CMD_CONFIRM = 0x05;
 
-// Button handling
-const uint8_t buttonsCount = 3;
-const uint8_t buttonPins[buttonsCount] = {13, 14, 26};
-volatile bool buttonPressed[buttonsCount] = {false, false, false};
-uint32_t lastDebounceTime[buttonsCount] = {0, 0, 0};
-const uint32_t debounceDelay = 50; // 50ms debounce time
+// LED and button pins
+const uint8_t ledPins[4] = {17, 25, 4, 12};
+const uint8_t buttonPin = 13;
 
-// LED pins
-const uint8_t redLed = 12;
-const uint8_t greenLed = 4;
+// Difficulty level (0-15)
+volatile uint8_t difficulty = 0;
+volatile bool difficultyLocked = false;
+volatile bool longPressDetected = false;
+volatile bool buttonPressed = false;
+volatile uint32_t pressDuration = 0;
 
-// Timer for LED states
-uint32_t stateCounter = 0;
-uint32_t lastBreatheUpdate = 0;
-uint32_t lastBlinkUpdate = 0;
+// Timing variables
+uint32_t buttonPressStart = 0;
+const uint32_t longPressDuration = 2000; // 2 seconds
 
-// Ignore received commands flag
-bool locked;
+// Random sequence variables
+const uint8_t maxSequenceLength = 15;
+uint8_t sequence[maxSequenceLength];
+uint8_t currentStep = 0;
 
-// Button interrupt handlers
-void IRAM_ATTR onButtonPress(int buttonIndex)
+// ESP-NOW callback for data sent
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-    unsigned long currentTime = millis();
-    if (currentTime - lastDebounceTime[buttonIndex] > debounceDelay)
+    Serial.print("Packet Send Status: ");
+    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+}
+
+// Display difficulty using binary representation on LEDs
+void displayDifficulty()
+{
+    // Serial.print("Displaying difficulty: ");
+    // Serial.println(difficulty);
+    for (int i = 0; i < 4; ++i)
     {
-        buttonPressed[buttonIndex] = true;
-        lastDebounceTime[buttonIndex] = currentTime;
+        digitalWrite(ledPins[i], (difficulty >> i) & 1 ? HIGH : LOW);
     }
 }
 
-void IRAM_ATTR onButton1Press() { onButtonPress(0); }
-void IRAM_ATTR onButton2Press() { onButtonPress(1); }
-void IRAM_ATTR onButton3Press() { onButtonPress(2); }
+// Generate a random sequence of numbers (1-3)
+void generateSequence()
+{
+    Serial.println("Generating random sequence");
+    for (int i = 0; i <= difficulty; ++i)
+    {
+        sequence[i] = random(1, 4);
+    }
+    currentStep = 0;
+}
+
+// Send game start command
+void sendGameStart()
+{
+    Serial.println("Sending game start command");
+    esp_now_send(remoteMacAddress, &CMD_GAME_START, sizeof(CMD_GAME_START));
+}
+
+// Process received data from remote node
+void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
+{
+    if (state != States::playing || len != 1)
+        return;
+
+    uint8_t guess = incomingData[0];
+    Serial.print("Received guess: ");
+    Serial.println(guess);
+    if (guess == sequence[currentStep])
+    {
+        currentStep++;
+        if (currentStep > difficulty)
+        {
+            esp_now_send(remoteMacAddress, &CMD_GAME_WON, sizeof(CMD_GAME_WON));
+            state = States::game_over;
+        }
+        else
+        {
+            esp_now_send(remoteMacAddress, &CMD_GOOD_GUESS, sizeof(CMD_GOOD_GUESS));
+        }
+    }
+    else
+    {
+        esp_now_send(remoteMacAddress, &CMD_WRONG_GUESS, sizeof(CMD_WRONG_GUESS));
+        currentStep = 0;
+    }
+}
+
+// Interrupt Service Routine for button press
+void IRAM_ATTR onButtonPress()
+{
+    if (digitalRead(buttonPin) == LOW)
+    {
+        buttonPressed = true;
+        buttonPressStart = millis();
+    }
+    else
+    {
+        pressDuration = millis() - buttonPressStart;
+        buttonPressed = false;
+    }
+}
 
 void setup()
 {
     Serial.begin(115200);
-    Serial.println("Running as remote node.");
-
-    // WiFi setup
     WiFi.mode(WIFI_STA);
-    Serial.print("Remote MAC Address: ");
+    Serial.print("Game manager MAC Address: ");
     Serial.println(WiFi.macAddress());
+
+    // Initialize LEDs and button
+    for (int i = 0; i < 4; ++i)
+    {
+        pinMode(ledPins[i], OUTPUT);
+        digitalWrite(ledPins[i], LOW);
+    }
+    pinMode(buttonPin, INPUT_PULLUP);
+    attachInterrupt(buttonPin, onButtonPress, CHANGE);
 
     // ESP-NOW setup
     if (esp_now_init() != ESP_OK)
@@ -115,7 +153,7 @@ void setup()
     esp_now_register_send_cb(onDataSent);
 
     esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, macAddress, 6);
+    memcpy(peerInfo.peer_addr, remoteMacAddress, 6);
     peerInfo.channel = 0;
     peerInfo.encrypt = false;
 
@@ -125,146 +163,71 @@ void setup()
         return;
     }
 
-    // Initialize buttons with interrupts
-    for (int i = 0; i < buttonsCount; ++i)
-    {
-        pinMode(buttonPins[i], INPUT_PULLUP);
-    }
-    attachInterrupt(buttonPins[0], onButton1Press, FALLING);
-    attachInterrupt(buttonPins[1], onButton2Press, FALLING);
-    attachInterrupt(buttonPins[2], onButton3Press, FALLING);
-
-    // LED setup
-    pinMode(redLed, OUTPUT);
-    pinMode(greenLed, OUTPUT);
+    esp_now_register_recv_cb(onDataRecv);
 
     // Initial state
-    state = States::ready;
-    Serial.println("Remote initialized; Waiting for the game to start.");
-}
-
-void sendButtonPress(int buttonIndex)
-{
-    uint8_t buttonCode = buttonIndex + 1; // Send 1, 2, or 3 for button presses
-    lastSentMessage = buttonCode;
-    esp_err_t result = esp_now_send(macAddress, &buttonCode, sizeof(buttonCode));
-    if (result == ESP_OK)
-    {
-        state = States::guessed;
-    }
-    else
-    {
-        Serial.println("Failed to send button press.");
-    }
-}
-
-void breatheLeds()
-{
-    if (millis() - lastBreatheUpdate >= 20)
-    {
-        float r_intensity = (sin(millis() / 1000.0) * 127) + 128;
-        float g_intensity = (cos(millis() / 1000.0) * 127) + 128;
-        analogWrite(redLed, (int)r_intensity);
-        analogWrite(greenLed, (int)g_intensity);
-        lastBreatheUpdate = millis();
-    }
+    state = States::idle;
+    displayDifficulty();
 }
 
 void loop()
 {
+    if (!buttonPressed && pressDuration > 0)
+    {
+        if (pressDuration >= longPressDuration)
+        {
+            difficultyLocked = true;
+            longPressDetected = true;
+            Serial.println("Long press detected, difficulty locked");
+        }
+        else if (!difficultyLocked)
+        {
+            difficulty = (difficulty + 1) % 16;
+            Serial.print("Button short press, new difficulty: ");
+            Serial.println(difficulty);
+            displayDifficulty();
+        }
+        pressDuration = 0; // Reset duration after processing
+    }
+
     switch (state)
     {
-    case States::ready:
-        breatheLeds();
+    case States::idle:
+        if (longPressDetected)
+        {
+            generateSequence();
+            sendGameStart();
+            state = States::countdown;
+            longPressDetected = false;
+        }
+        break;
+
+    case States::countdown:
+        for (int i = 0; i < 3; ++i)
+        {
+            for (int j = 0; j < 4; ++j)
+            {
+                digitalWrite(ledPins[j], HIGH);
+            }
+            delay(200);
+            for (int j = 0; j < 4; ++j)
+            {
+                digitalWrite(ledPins[j], LOW);
+            }
+            delay(200);
+        }
+        state = States::playing;
         break;
 
     case States::playing:
-        for (int i = 0; i < buttonsCount; ++i)
-        {
-            if (buttonPressed[i])
-            {
-                buttonPressed[i] = false;
-                sendButtonPress(i);
-            }
-        }
+        displayDifficulty();
         break;
 
-    case States::guessed:
-        // Waiting for a confirmation response
-        break;
-
-    case States::correct:
-        digitalWrite(greenLed, HIGH);
-        if (millis() - stateCounter > 2000)
-        {
-            state = States::playing;
-            digitalWrite(greenLed, LOW);
-        }
-        break;
-        
-        case States::wrong:
-        digitalWrite(redLed, HIGH);
-        if (millis() - stateCounter > 2000)
-        {
-            state = States::playing;
-            digitalWrite(redLed, LOW);
-            locked = false;
-        }
-        break;
-        
-        case States::won:
-        digitalWrite(redLed, millis() % 2000 < 1000 ? HIGH : LOW);
-        digitalWrite(greenLed, millis() % 2000 < 1000 ? HIGH : LOW);
-        if (millis() - stateCounter > 10000)
-        {
-            state = States::ready;
-            digitalWrite(greenLed, LOW);
-            digitalWrite(redLed, LOW);
-            locked = false;
-        }
+    case States::game_over:
+        delay(3000);
+        state = States::idle;
+        difficultyLocked = false;
+        displayDifficulty();
         break;
     }
-}
-
-// Callback to receive data
-void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
-{
-    if (!locked)
-    {
-        if (len != 1)
-        {
-            return; // Expecting single byte commands
-        }
-        uint8_t command = incomingData[0];
-        switch (command)
-        {
-        case CMD_GAME_START:
-            state = States::playing;
-            break;
-        case CMD_GOOD_GUESS:
-            state = States::correct;
-            stateCounter = millis();
-            locked = true;
-            break;
-        case CMD_WRONG_GUESS:
-            state = States::wrong;
-            stateCounter = millis();
-            locked = true;
-            break;
-        case CMD_GAME_WON:
-            state = States::won;
-            stateCounter = millis();
-            locked = true;
-            break;
-        case CMD_CONFIRM:
-            Serial.println("Command confirmed by Game Manager.");
-            break;
-        }
-    }
-}
-
-// Register the receive callback
-void registerCallbacks()
-{
-    esp_now_register_recv_cb(onDataRecv);
 }
