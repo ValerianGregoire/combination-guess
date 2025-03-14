@@ -75,7 +75,7 @@ bool locked;
 // Button interrupt handlers
 void IRAM_ATTR onButtonPress(int buttonIndex)
 {
-    unsigned long currentTime = millis();
+    uint32_t currentTime = millis();
 
     // Only take the first press into consideration
     if (currentTime - lastDebounceTime[buttonIndex] > debounceDelay)
