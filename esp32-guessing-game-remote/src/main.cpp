@@ -52,7 +52,6 @@ const uint8_t CMD_GAME_START = 0x01;
 const uint8_t CMD_GOOD_GUESS = 0x02;
 const uint8_t CMD_WRONG_GUESS = 0x03;
 const uint8_t CMD_GAME_WON = 0x04;
-const uint8_t CMD_CONFIRM = 0x05;
 
 // Button handling
 const uint8_t buttonsCount = 3;
@@ -179,6 +178,8 @@ void loop()
             {
                 buttonPressed[i] = false;
                 sendButtonPress(i);
+                Serial.print("Sent pressed signal for button ");
+                Serial.println(i);
             }
         }
         break;
@@ -193,30 +194,31 @@ void loop()
         {
             state = States::playing;
             digitalWrite(greenLed, LOW);
-        }
-        break;
-        
-        case States::wrong:
-        digitalWrite(redLed, HIGH);
-        if (millis() - lastStateUpdate > 2000)
-        {
-            state = States::playing;
-            digitalWrite(redLed, LOW);
             locked = false;
         }
         break;
         
-        case States::won:
-        digitalWrite(redLed, millis() % 2000 < 1000 ? HIGH : LOW);
-        digitalWrite(greenLed, millis() % 2000 < 1000 ? HIGH : LOW);
-        if (millis() - lastStateUpdate > 10000)
-        {
-            state = States::ready;
-            digitalWrite(greenLed, LOW);
-            digitalWrite(redLed, LOW);
-            locked = false;
-        }
-        break;
+    case States::wrong:
+    digitalWrite(redLed, HIGH);
+    if (millis() - lastStateUpdate > 2000)
+    {
+        state = States::playing;
+        digitalWrite(redLed, LOW);
+        locked = false;
+    }
+    break;
+    
+    case States::won:
+    digitalWrite(redLed, millis() % 2000 < 1000 ? HIGH : LOW);
+    digitalWrite(greenLed, millis() % 2000 < 1000 ? HIGH : LOW);
+    if (millis() - lastStateUpdate > 10000)
+    {
+        state = States::ready;
+        digitalWrite(greenLed, LOW);
+        digitalWrite(redLed, LOW);
+        locked = false;
+    }
+    break;
     }
 }
 
@@ -249,9 +251,6 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
             state = States::won;
             lastStateUpdate = millis();
             locked = true;
-            break;
-        case CMD_CONFIRM:
-            Serial.println("Command confirmed by Game Manager.");
             break;
         }
     }

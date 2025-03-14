@@ -35,9 +35,13 @@ const uint8_t buttonPin = 13;
 // Difficulty level (0-15)
 volatile uint8_t difficulty = 0;
 volatile bool difficultyLocked = false;
-volatile bool longPressDetected = false;
-volatile bool buttonPressed = false;
+volatile bool longPressed = false;
+volatile bool shortPressed = false;
 volatile uint32_t pressDuration = 0;
+
+// Debouncing
+volatile uint32_t lastDebounceTime = 0;
+const uint32_t debounceDelay = 20; // 50ms debounce time
 
 // Timing variables
 uint32_t buttonPressStart = 0;
@@ -47,6 +51,10 @@ const uint32_t longPressDuration = 2000; // 2 seconds
 const uint8_t maxSequenceLength = 15;
 uint8_t sequence[maxSequenceLength];
 uint8_t currentStep = 0;
+
+// Player inputs
+volatile uint8_t guess;
+const uint8_t idleGuess = 255;
 
 // ESP-NOW callback for data sent
 void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
@@ -58,8 +66,6 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 // Display difficulty using binary representation on LEDs
 void displayDifficulty()
 {
-    // Serial.print("Displaying difficulty: ");
-    // Serial.println(difficulty);
     for (int i = 0; i < 4; ++i)
     {
         digitalWrite(ledPins[i], (difficulty >> i) & 1 ? HIGH : LOW);
@@ -87,10 +93,58 @@ void sendGameStart()
 // Process received data from remote node
 void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
 {
-    if (state != States::playing || len != 1)
+    if (state != States::playing)
         return;
 
-    uint8_t guess = incomingData[0];
+    guess = incomingData[0];
+}
+
+// Interrupt Service Routine for button press
+void IRAM_ATTR onButtonPress()
+{
+    uint32_t currentMillis = millis();
+    if (currentMillis - lastDebounceTime > debounceDelay)
+    {
+        updateButtonState();
+    }
+}
+
+void updateButtonState()
+{
+    uint32_t currentMillis = millis();
+    if (digitalRead(buttonPin))
+    {
+        lastDebounceTime = currentMillis;
+        buttonPressStart = currentMillis;
+    }
+    else
+    {
+        pressDuration = currentMillis - buttonPressStart;
+        if (pressDuration >= longPressDuration)
+        {
+            longPressed = true;
+            shortPressed = false;
+        }
+        else
+        {
+            longPressed = false;
+            shortPressed = true;
+        }
+
+    }
+}
+
+void increaseDifficulty()
+{
+    difficulty = (difficulty + 1) % 16;
+    Serial.print("New difficulty: ");
+    Serial.println(difficulty);
+    displayDifficulty();
+}
+
+// Player guess logic
+void treatGuess()
+{
     Serial.print("Received guess: ");
     Serial.println(guess);
     if (guess == sequence[currentStep])
@@ -113,18 +167,21 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
     }
 }
 
-// Interrupt Service Routine for button press
-void IRAM_ATTR onButtonPress()
+// Blink all LEDs to inform the player
+void alertBlink()
 {
-    if (digitalRead(buttonPin) == LOW)
+    for (int i = 0; i < 3; ++i)
     {
-        buttonPressed = true;
-        buttonPressStart = millis();
-    }
-    else
-    {
-        pressDuration = millis() - buttonPressStart;
-        buttonPressed = false;
+        for (int j = 0; j < 4; ++j)
+        {
+            digitalWrite(ledPins[j], HIGH);
+        }
+        delay(500);
+        for (int j = 0; j < 4; ++j)
+        {
+            digitalWrite(ledPins[j], LOW);
+        }
+        delay(500);
     }
 }
 
@@ -166,68 +223,45 @@ void setup()
     esp_now_register_recv_cb(onDataRecv);
 
     // Initial state
+    Serial.println("Initialization complete. Waiting for game start command.");
     state = States::idle;
     displayDifficulty();
 }
 
 void loop()
 {
-    if (!buttonPressed && pressDuration > 0)
-    {
-        if (pressDuration >= longPressDuration)
-        {
-            difficultyLocked = true;
-            longPressDetected = true;
-            Serial.println("Long press detected, difficulty locked");
-        }
-        else if (!difficultyLocked)
-        {
-            difficulty = (difficulty + 1) % 16;
-            Serial.print("Button short press, new difficulty: ");
-            Serial.println(difficulty);
-            displayDifficulty();
-        }
-        pressDuration = 0; // Reset duration after processing
-    }
-
     switch (state)
     {
     case States::idle:
-        if (longPressDetected)
+        if (longPressed)
         {
             generateSequence();
-            sendGameStart();
             state = States::countdown;
-            longPressDetected = false;
+            longPressed = false;
         }
-        break;
-
-    case States::countdown:
-        for (int i = 0; i < 3; ++i)
+        else if (shortPressed)
         {
-            for (int j = 0; j < 4; ++j)
-            {
-                digitalWrite(ledPins[j], HIGH);
-            }
-            delay(200);
-            for (int j = 0; j < 4; ++j)
-            {
-                digitalWrite(ledPins[j], LOW);
-            }
-            delay(200);
+            increaseDifficulty();
+            shortPressed = false;
         }
-        state = States::playing;
         break;
+        
+        case States::countdown:
+            alertBlink();
+            sendGameStart();
+            state = States::playing;
+            break;
 
     case States::playing:
+        treatGuess();
         displayDifficulty();
         break;
 
     case States::game_over:
+        alertBlink();
         delay(3000);
         state = States::idle;
         difficultyLocked = false;
-        displayDifficulty();
         break;
     }
 }
