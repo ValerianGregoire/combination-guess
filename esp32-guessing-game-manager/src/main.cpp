@@ -22,6 +22,9 @@ enum class States
 };
 States state;
 
+// TX/RX variables
+esp_err_t sendStatus;
+
 // Command codes
 const uint8_t CMD_GAME_START = 0x01;
 const uint8_t CMD_GOOD_GUESS = 0x02;
@@ -38,10 +41,6 @@ volatile bool difficultyLocked = false;
 volatile bool buttonInter = true;
 bool longPressed = false;
 bool shortPressed = false;
-
-// Time conversions
-uint32_t toMillis = 240000;
-uint32_t toSecs = 240000000;
 
 // Debouncing
 volatile uint32_t lastDebounceTime = 0;
@@ -89,10 +88,10 @@ void generateSequence()
 }
 
 // Send game start command
-void sendGameStart()
+esp_err_t sendGameStart()
 {
     Serial.println("Sending game start command");
-    esp_now_send(remoteMacAddress, &CMD_GAME_START, sizeof(CMD_GAME_START));
+    return esp_now_send(remoteMacAddress, &CMD_GAME_START, sizeof(CMD_GAME_START));
 }
 
 // Process received data from remote node
@@ -220,6 +219,7 @@ void setup()
         ESP.restart();
     }
     esp_now_register_send_cb(onDataSent);
+    esp_now_register_recv_cb(onDataRecv);
     
     // Adding the remote to the peers for communication
     esp_now_peer_info_t peerInfo = {};
@@ -243,8 +243,6 @@ void setup()
         }
     }
 
-    esp_now_register_recv_cb(onDataRecv);
-
     // Initial state
     Serial.println("Initialization complete. Waiting for game start command.");
     state = States::idle;
@@ -255,38 +253,66 @@ void loop()
 {
     switch (state)
     {
-        case States::idle:
-            if (buttonInter)
+    case States::idle:
+        // Button pressed servicing
+        if (buttonInter)
+        {
+            updateButtonState();
+            if (longPressed)
             {
-                updateButtonState();
-                if (longPressed)
-                {
-                    generateSequence();
-                    state = States::countdown;
-                    longPressed = false;
-                }
-                else if (shortPressed)
-                {
-                    increaseDifficulty();
-                    shortPressed = false;
-                }
-                buttonInter = false;
+                generateSequence();
+                state = States::countdown;
+                longPressed = false;
             }
-            break;
-        
-        case States::countdown:
-            alertBlink();
-            delay(1000);
-            sendGameStart();
-            state = States::playing;
-            break;
+            else if (shortPressed)
+            {
+                increaseDifficulty();
+                shortPressed = false;
+            }
+            buttonInter = false;
+        }
+        break;
+    
+    case States::countdown:
+        alertBlink();
+        delay(1000);
+        Serial.println("Sending start signal");
+        sendStatus = sendGameStart();
+        Serial.print("Send status: ");
+        switch (sendStatus)
+        {
+            case ESP_OK:
+                Serial.println("ESP_OK");
+                break;
+            case ESP_ERR_ESPNOW_NOT_INIT:
+                Serial.println("ESP_ERR_ESPNOW_NOT_INIT");
+                break;
+            case ESP_ERR_ESPNOW_ARG:
+                Serial.println("ESP_ERR_ESPNOW_ARG");
+                break;
+            case ESP_ERR_ESPNOW_INTERNAL:
+                Serial.println("ESP_ERR_ESPNOW_INTERNAL");
+                break;
+            case ESP_ERR_ESPNOW_NO_MEM:
+                Serial.println("ESP_ERR_ESPNOW_NO_MEM");
+                break;
+            case ESP_ERR_ESPNOW_NOT_FOUND:
+                Serial.println("ESP_ERR_ESPNOW_NOT_FOUND");
+                break;
+            case ESP_ERR_ESPNOW_IF:
+                Serial.println("ESP_ERR_ESPNOW_IF");
+                break;
+        }
+        state = States::playing;
+        break;
 
     case States::playing:
-    displayDifficulty();
-    if (guessed)
-    {
-        treatGuess();
-    }
+        displayDifficulty();
+        if (guessed)
+        {
+            treatGuess();
+            guessed = false;
+        }
     break;
 
     case States::game_over:

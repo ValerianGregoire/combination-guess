@@ -15,25 +15,6 @@ uint8_t macAddress[6] = {0x30, 0xC9, 0x22, 0xFF, 0x71, 0xAC};
 // Message buffer for retries
 uint8_t lastSentMessage;
 
-// Callback when data is sent
-void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
-{
-    Serial.print("Last Packet Send Status: ");
-    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
-
-    uint8_t retries = 0;
-    while (status != ESP_NOW_SEND_SUCCESS && retries++ < 5)
-    {
-        // Serial.printf("Resending... Attempt %d\n", retries);
-        esp_err_t result = esp_now_send(mac_addr, &lastSentMessage, sizeof(lastSentMessage));
-        delay(100);
-    }
-
-    if (retries == 5)
-    {
-        Serial.println("Failed to send after 5 attempts");
-    }
-}
 
 // State machine variables
 enum class States
@@ -78,11 +59,58 @@ uint32_t lastBlinkUpdate = 0;
 // Ignore received commands flag
 bool locked;
 
+// Callback when data is sent
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
+{
+    Serial.print("Last Packet Send Status: ");
+    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+    
+    uint8_t retries = 0;
+    while (status != ESP_NOW_SEND_SUCCESS && retries++ < 5)
+    {
+        // Serial.printf("Resending... Attempt %d\n", retries);
+        esp_err_t result = esp_now_send(mac_addr, &lastSentMessage, sizeof(lastSentMessage));
+        delay(100);
+    }
+    
+    if (retries == 5)
+    {
+        Serial.println("Failed to send after 5 attempts");
+    }
+}
+
+// Callback to receive data
+void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
+{
+    if (!locked)
+    {
+        if (len != 1)
+        {
+            return; // Expecting single byte commands
+        }
+        uint8_t command = incomingData[0];
+        switch (command)
+        {
+        case CMD_GAME_START:
+            startSignal = true;
+            break;
+        case CMD_GOOD_GUESS:
+            rightGuess = true;
+            break;
+        case CMD_WRONG_GUESS:
+            wrongGuess = true;
+            break;
+        case CMD_GAME_WON:
+            wonSignal = true;
+            break;
+        }
+    }
+}
 // Button interrupt handlers
 void IRAM_ATTR onButtonPress(int buttonIndex)
 {
     uint32_t currentTime = millis();
-
+    
     // Only take the first press into consideration
     if (currentTime - lastDebounceTime[buttonIndex] > debounceDelay)
     {
@@ -99,12 +127,12 @@ void setup()
 {
     Serial.begin(115200);
     Serial.println("Running as remote node.");
-
+    
     // WiFi setup
     WiFi.mode(WIFI_STA);
     Serial.print("Remote MAC Address: ");
     Serial.println(WiFi.macAddress());
-
+    
     // ESP-NOW init
     if (esp_now_init() != ESP_OK)
     {
@@ -112,12 +140,13 @@ void setup()
         ESP.restart();
     }
     esp_now_register_send_cb(onDataSent);
-
+    esp_now_register_recv_cb(onDataRecv);
+    
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, macAddress, 6);
     peerInfo.channel = 1;
     peerInfo.encrypt = false;
-
+    
     if (esp_now_add_peer(&peerInfo) != ESP_OK)
     {
         Serial.println("Failed to add peer");
@@ -177,10 +206,10 @@ void loop()
     {
     case States::ready:
         locked = false;
+        breatheLeds();
         if (startSignal)
         {
             Serial.println("The game starts !");
-            breatheLeds();
             startSignal = false;
             state = States::playing;
             lastStateUpdate = millis();
@@ -270,36 +299,3 @@ void loop()
     }
 }
 
-// Callback to receive data
-void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
-{
-    if (!locked)
-    {
-        if (len != 1)
-        {
-            return; // Expecting single byte commands
-        }
-        uint8_t command = incomingData[0];
-        switch (command)
-        {
-        case CMD_GAME_START:
-            startSignal = true;
-            break;
-        case CMD_GOOD_GUESS:
-            rightGuess = true;
-            break;
-        case CMD_WRONG_GUESS:
-            wrongGuess = true;
-            break;
-        case CMD_GAME_WON:
-            wonSignal = true;
-            break;
-        }
-    }
-}
-
-// Register the receive callback
-void registerCallbacks()
-{
-    esp_now_register_recv_cb(onDataRecv);
-}
