@@ -35,7 +35,7 @@ const uint8_t buttonPin = 13;
 // Difficulty level (0-15)
 volatile uint8_t difficulty = 0;
 volatile bool difficultyLocked = false;
-volatile bool buttonPressed = false;
+volatile bool buttonInter = true;
 bool longPressed = false;
 bool shortPressed = false;
 
@@ -45,7 +45,7 @@ uint32_t toSecs = 240000000;
 
 // Debouncing
 volatile uint32_t lastDebounceTime = 0;
-const uint32_t debounceDelay = 100; // * toMillis; // 20ms debounce time
+const uint32_t debounceDelay = 50; // * toMillis; // 20ms debounce time
 
 // Timing variables
 uint32_t buttonPressStart = 0;
@@ -108,18 +108,16 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
 void updateButtonState()
 {
     bool buttonState = digitalRead(buttonPin);
-    if (!buttonState && buttonPressStart > 0)
+    if (buttonState && buttonPressStart > 0)
     { // Only process when button is released
         if (millis() - buttonPressStart >= longPressDuration)
         {
             longPressed = true;
-            shortPressed = false;
             Serial.println("Long press detected!");
         }
         else
         {
             shortPressed = true;
-            longPressed = false;
             Serial.println("Short press detected!");
         }
 
@@ -127,7 +125,7 @@ void updateButtonState()
         buttonPressStart = 0;
         return;
     }
-    buttonPressStart = buttonState ? millis() : 0;
+    buttonPressStart = !buttonState ? millis() : 0;
 }
 
 // Interrupt Service Routine for button press
@@ -137,7 +135,7 @@ void IRAM_ATTR onButtonPress()
     if (currentMillis - lastDebounceTime > debounceDelay)
     {
         lastDebounceTime = currentMillis;
-        buttonPressed = true;
+        buttonInter = true;
     }
 }
 
@@ -212,7 +210,7 @@ void setup()
         pinMode(ledPins[i], OUTPUT);
         digitalWrite(ledPins[i], LOW);
     }
-    pinMode(buttonPin, INPUT);
+    pinMode(buttonPin, INPUT_PULLUP);
     attachInterrupt(buttonPin, onButtonPress, CHANGE);
 
     // ESP-NOW setup
@@ -247,7 +245,7 @@ void loop()
     switch (state)
     {
         case States::idle:
-            if (buttonPressed)
+            if (buttonInter)
             {
                 updateButtonState();
                 if (longPressed)
@@ -261,13 +259,13 @@ void loop()
                     increaseDifficulty();
                     shortPressed = false;
                 }
-                buttonPressed = false;
+                buttonInter = false;
             }
             break;
         
         case States::countdown:
             alertBlink();
-            delay(3000);
+            delay(1000);
             sendGameStart();
             state = States::playing;
             break;
