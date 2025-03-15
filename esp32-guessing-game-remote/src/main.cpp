@@ -45,7 +45,13 @@ enum class States
     wrong,
     won
 };
-volatile States state;
+States state;
+
+// FSM flags
+volatile bool startSignal = false;
+volatile bool rightGuess = false;
+volatile bool wrongGuess = false;
+volatile bool wonSignal = false;
 
 // Command codes
 const uint8_t CMD_GAME_START = 0x01;
@@ -136,7 +142,7 @@ void setup()
     Serial.println("Remote initialized; Waiting for the game to start.");
 }
 
-void sendButtonPress(int buttonIndex)
+bool sendButtonPress(int buttonIndex)
 {
     uint8_t buttonCode = buttonIndex + 1; // Send 1, 2, or 3 for button presses
     lastSentMessage = buttonCode;
@@ -144,10 +150,12 @@ void sendButtonPress(int buttonIndex)
     if (result == ESP_OK)
     {
         state = States::guessed;
+        return true;
     }
     else
     {
         Serial.println("Failed to send button press.");
+        return false;
     }
 }
 
@@ -169,24 +177,60 @@ void loop()
     {
     case States::ready:
         locked = false;
-        breatheLeds();
+        if (startSignal)
+        {
+            Serial.println("The game starts !");
+            breatheLeds();
+            startSignal = false;
+            state = States::playing;
+            lastStateUpdate = millis();
+        }
         break;
 
     case States::playing:
+        locked = false;
         for (int i = 0; i < buttonsCount; ++i)
         {
             if (buttonPressed[i])
             {
                 buttonPressed[i] = false;
-                sendButtonPress(i);
-                Serial.print("Sent pressed signal for button ");
-                Serial.println(i);
+                bool sendSuccess = sendButtonPress(i);
+                if (sendSuccess)
+                {
+                    Serial.print("Sent pressed signal for button ");
+                    Serial.println(i);
+                    state = States::guessed;
+                    lastStateUpdate = millis();
+                }
             }
         }
         break;
 
     case States::guessed:
-        // Waiting for a confirmation response
+        if (wonSignal)
+        {
+            wonSignal = false;
+            Serial.println("Game won !");
+            state = States::won;
+            lastStateUpdate = millis();
+            locked = true;
+        }
+        else if (rightGuess)
+        {
+            rightGuess = false;
+            Serial.println("Right guess !");
+            state = States::correct;
+            lastStateUpdate = millis();
+            locked = true;
+        }
+        else if (wrongGuess)
+        {
+            wrongGuess = false;
+            Serial.println("Wrong guess !");
+            state = States::wrong;
+            lastStateUpdate = millis();
+            locked = true;
+        }
         break;
 
     case States::correct:
@@ -194,32 +238,35 @@ void loop()
         if (millis() - lastStateUpdate > 2000)
         {
             state = States::playing;
+            lastStateUpdate = millis();
             digitalWrite(greenLed, LOW);
             locked = false;
         }
         break;
         
     case States::wrong:
-    digitalWrite(redLed, HIGH);
-    if (millis() - lastStateUpdate > 2000)
-    {
-        state = States::playing;
-        digitalWrite(redLed, LOW);
-        locked = false;
-    }
-    break;
+        digitalWrite(redLed, HIGH);
+        if (millis() - lastStateUpdate > 2000)
+        {
+            state = States::playing;
+            lastStateUpdate = millis();
+            digitalWrite(redLed, LOW);
+            locked = false;
+        }
+        break;
     
     case States::won:
-    digitalWrite(redLed, millis() % 2000 < 1000 ? HIGH : LOW);
-    digitalWrite(greenLed, millis() % 2000 < 1000 ? HIGH : LOW);
-    if (millis() - lastStateUpdate > 10000)
-    {
-        state = States::ready;
-        digitalWrite(greenLed, LOW);
-        digitalWrite(redLed, LOW);
-        locked = false;
-    }
-    break;
+        digitalWrite(redLed, millis() % 2000 < 1000 ? HIGH : LOW);
+        digitalWrite(greenLed, millis() % 2000 < 1000 ? HIGH : LOW);
+        if (millis() - lastStateUpdate > 10000)
+        {
+            Serial.println("Waiting for a new game start signal.");
+            state = States::ready;
+            digitalWrite(greenLed, LOW);
+            digitalWrite(redLed, LOW);
+            locked = false;
+        }
+        break;
     }
 }
 
@@ -236,22 +283,16 @@ void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
         switch (command)
         {
         case CMD_GAME_START:
-            state = States::playing;
+            startSignal = true;
             break;
         case CMD_GOOD_GUESS:
-            state = States::correct;
-            lastStateUpdate = millis();
-            locked = true;
+            rightGuess = true;
             break;
         case CMD_WRONG_GUESS:
-            state = States::wrong;
-            lastStateUpdate = millis();
-            locked = true;
+            wrongGuess = true;
             break;
         case CMD_GAME_WON:
-            state = States::won;
-            lastStateUpdate = millis();
-            locked = true;
+            wonSignal = true;
             break;
         }
     }
