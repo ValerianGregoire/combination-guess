@@ -213,23 +213,34 @@ void setup()
     pinMode(buttonPin, INPUT_PULLUP);
     attachInterrupt(buttonPin, onButtonPress, CHANGE);
 
-    // ESP-NOW setup
+    // ESP-NOW init
     if (esp_now_init() != ESP_OK)
     {
         Serial.println("Error initializing ESP-NOW");
-        return;
+        ESP.restart();
     }
     esp_now_register_send_cb(onDataSent);
-
+    
+    // Adding the remote to the peers for communication
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, remoteMacAddress, 6);
-    peerInfo.channel = 0;
+    peerInfo.channel = 1;
     peerInfo.encrypt = false;
 
-    if (esp_now_add_peer(&peerInfo) != ESP_OK)
+    if (esp_now_is_peer_exist(remoteMacAddress))
     {
-        Serial.println("Failed to add peer");
-        return;
+        Serial.println("Peer already added.");
+    }
+    else
+    {
+        if (esp_now_add_peer(&peerInfo) == ESP_OK)
+        {
+            Serial.println("Peer added successfully.");
+        }
+        else
+        {
+            Serial.println("Failed to add peer.");
+        }
     }
 
     esp_now_register_recv_cb(onDataRecv);
